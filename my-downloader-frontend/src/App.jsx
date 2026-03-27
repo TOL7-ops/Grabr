@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Component } from "react";
 import { API_BASE, submitDownload, pollJob } from "./api";
+import "./App.css"
 
 const POLL_MS = 2500;
 

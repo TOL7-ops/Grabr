@@ -12,7 +12,7 @@ const config = {
   },
 
   storage: {
-    downloadPath: process.env.DOWNLOAD_PATH || "downloads",
+    downloadPath: process.env.DOWNLOAD_PATH || "/tmp/downloads",
     maxFileSizeMb: parseInt(process.env.MAX_FILE_SIZE_MB, 10) || 500,
     maxFileAgeHours: parseInt(process.env.MAX_FILE_AGE_HOURS, 10) || 24,
   },

@@ -6,3 +6,5 @@ logs/
 dist/
 build/
 venv/
+.vercel
+.env*.local

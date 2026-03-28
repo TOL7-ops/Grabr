@@ -66,7 +66,17 @@ const RE_DEST     = /\[download\] Destination:\s+(.+)/;
 // progressObject shape: { status, percent, speed?, eta?, size?, filename?, fileUrl?, message? }
 async function runDownload(url, format, jobId, onProgress) {
   const downloadDir = path.resolve(config.storage.downloadPath);
-  if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
+  if (!fs.existsSync(downloadDir)) {
+    try {
+      fs.mkdirSync(downloadDir, { recursive: true, mode: 0o755 });
+    } catch (mkErr) {
+      logger.error("Cannot create download dir", { path: downloadDir, error: mkErr.message });
+      throw new Error(`EACCES: Cannot create download directory: ${downloadDir}. Set DOWNLOAD_PATH=/tmp/downloads in environment variables.`);
+    }
+  }
+  // Verify write permission
+  try { fs.accessSync(downloadDir, fs.constants.W_OK); }
+  catch { throw new Error(`No write permission on download directory: ${downloadDir}`); }
 
   const outputTemplate = path.join(downloadDir, `${jobId}_%(title)s.%(ext)s`);
   const ytdlpBin = process.env.YTDLP_PATH || "yt-dlp";

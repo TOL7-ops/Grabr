@@ -71,6 +71,26 @@ app.use(
 
 app.use("/api/download", downloadRoutes);
 
+app.get("/debug/path", (_req, res) => {
+  const config = require("./config");
+  const fs = require("fs");
+  const dir = config.storage.downloadPath;
+  const exists = fs.existsSync(dir);
+  let writable = false;
+  try { fs.accessSync(dir, fs.constants.W_OK); writable = true; } catch {}
+  res.json({ downloadPath: dir, exists, writable, NODE_ENV: process.env.NODE_ENV, DOWNLOAD_PATH_ENV: process.env.DOWNLOAD_PATH });
+});
+
+app.get("/debug/path", (_req, res) => {
+  const config = require("./config");
+  const fs = require("fs");
+  const dir = config.storage.downloadPath;
+  const exists = fs.existsSync(dir);
+  let writable = false;
+  try { fs.accessSync(dir, fs.constants.W_OK); writable = true; } catch {}
+  res.json({ downloadPath: dir, exists, writable, NODE_ENV: process.env.NODE_ENV, DOWNLOAD_PATH_ENV: process.env.DOWNLOAD_PATH });
+});
+
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", uptime: process.uptime(), ts: new Date().toISOString() });
 });

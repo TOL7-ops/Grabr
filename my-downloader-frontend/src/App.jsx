@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Component } from "react";
 import { API_BASE, submitDownload, watchJob, safeStr as apiSafeStr } from "./api";
+import './App.css';
 
 // ── Platform config ────────────────────────────────────────────
 const PLATFORMS = {

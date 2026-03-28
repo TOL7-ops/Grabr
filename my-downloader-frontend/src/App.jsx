@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Component } from "react";
-import { API_BASE, submitDownload, watchJob, safeStr as apiSafeStr } from "./api";
+import MediaPreview from "./MediaPreview";
+import { API_BASE, submitDownload, watchJob, safeStr } from "./api";
 import './App.css';
 
 // ── Platform config ────────────────────────────────────────────
@@ -30,13 +31,12 @@ function timeAgo(iso) {
 }
 
 // Ensure any value is rendered as a safe string
-function safeStr(v) {
-  if (v === null || v === undefined) return "";
-  if (typeof v === "string") return v;
-  if (typeof v === "number" || typeof v === "boolean") return String(v);
-  try { return JSON.stringify(v); } catch { return "Unknown error"; }
-}
-
+// const safeStr = (v) => {
+//   if (!v) return "";
+//   if (typeof v === "string") return v;
+//   if (v.message) return v.message;
+//   try { return JSON.stringify(v); } catch { return String(v); }
+// };
 // ── Platform SVG logos ─────────────────────────────────────────
 const PlatformLogo = ({ id, size = 28 }) => {
   const s = { width: size, height: size, borderRadius: 8, flexShrink: 0, display: "block" };
@@ -135,13 +135,13 @@ function useDownloadManager() {
           patch(localId, { state: "active", progress: 99 });
         }
       },
-      onComplete: (filename, fileUrl) => {
+      onComplete: (filename, fileUrl, mediaType) => {
         delete stoppers.current[localId];
         patch(localId, {
           state:       "completed",
           progress:    100,
           completedAt: new Date().toISOString(),
-          result:      { filename: safeStr(filename), downloadUrl: safeStr(fileUrl) },
+          result:      { filename: safeStr(filename), downloadUrl: safeStr(fileUrl), mediaType: safeStr(mediaType) },
         });
       },
       onError: (message) => {

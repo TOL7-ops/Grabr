@@ -21,16 +21,24 @@ export async function submitDownload(url, format) {
     if (!res.ok) return { ok: false, error: safeStr(data?.error || "Request failed") };
     return { ok: true, jobId: String(data.jobId) };
   } catch (err) {
-    return { ok: false, error: safeStr(err?.message || "Network error — check your connection") };
+    return { ok: false, error: safeStr(err?.message || "Network error") };
   }
 }
 
+/**
+ * watchJob — SSE with polling fallback
+ * Callbacks:
+ *   onProgress(percent, speed, eta, size)
+ *   onStatus(status)
+ *   onComplete(filename, fileUrl, mediaType)
+ *   onError(message)
+ */
 export function watchJob(jobId, { onProgress, onStatus, onComplete, onError }) {
   let closed = false;
   let es = null;
   let pollTimer = null;
   let retries = 0;
-  const MAX_RETRIES = 3;
+  const MAX_SSE_RETRIES = 3;
 
   function stop() {
     closed = true;
@@ -40,28 +48,46 @@ export function watchJob(jobId, { onProgress, onStatus, onComplete, onError }) {
 
   function handleEvent(data) {
     if (closed) return;
-    onStatus && onStatus(safeStr(data.status));
-    switch (data.status) {
-      case "starting":     onProgress && onProgress(0, "", "", ""); break;
-      case "downloading":
-        onProgress && onProgress(Number(data.percent)||0, safeStr(data.speed), safeStr(data.eta), safeStr(data.size));
+    const status = safeStr(data.status);
+    onStatus && onStatus(status);
+
+    switch (status) {
+      case "starting":
+        onProgress && onProgress(0, "", "", "");
         break;
-      case "processing":   onProgress && onProgress(99, "", "", ""); break;
+      case "downloading":
+        onProgress && onProgress(
+          Number(data.percent) || 0,
+          safeStr(data.speed),
+          safeStr(data.eta),
+          safeStr(data.size),
+        );
+        break;
+      case "processing":
+        onProgress && onProgress(99, "", "", "");
+        break;
       case "completed":
         onProgress && onProgress(100, "", "", "");
-        onComplete && onComplete(safeStr(data.filename), safeStr(data.fileUrl));
-        stop(); break;
+        onComplete && onComplete(
+          safeStr(data.filename),
+          safeStr(data.fileUrl),
+          safeStr(data.mediaType || "file"),
+        );
+        stop();
+        break;
       case "error":
-        onError && onError(safeStr(data.message));
-        stop(); break;
+        onError && onError(safeStr(data.message || "Download failed"));
+        stop();
+        break;
     }
   }
 
+  // Polling fallback
   function startPolling() {
     if (closed || pollTimer) return;
     let count = 0;
     pollTimer = setInterval(async () => {
-      if (closed) { clearInterval(pollTimer); return; }
+      if (closed) return;
       count++;
       try {
         const res  = await fetch(`${API_BASE}/api/download/${jobId}`);
@@ -69,20 +95,26 @@ export function watchJob(jobId, { onProgress, onStatus, onComplete, onError }) {
         const pct  = Number(data.progress) || 0;
         onProgress && onProgress(pct, "", "", "");
         onStatus   && onStatus(safeStr(data.state));
+
         if (data.state === "completed" && data.result) {
           onProgress && onProgress(100, "", "", "");
-          onComplete && onComplete(safeStr(data.result.filename), safeStr(data.result.downloadUrl));
+          onComplete && onComplete(
+            safeStr(data.result.filename),
+            safeStr(data.result.downloadUrl),
+            safeStr(data.result.mediaType || "file"),
+          );
           stop();
         } else if (data.state === "failed") {
           onError && onError(safeStr(data.error || "Download failed"));
           stop();
         }
       } catch {
-        if (count > 72) { onError && onError("Connection lost after 3 minutes"); stop(); }
+        if (count > 72) { onError && onError("Connection lost"); stop(); }
       }
     }, 2500);
   }
 
+  // SSE primary
   function openSSE() {
     if (closed) return;
     try {
@@ -94,7 +126,7 @@ export function watchJob(jobId, { onProgress, onStatus, onComplete, onError }) {
       es.onerror = () => {
         if (closed) return;
         retries++;
-        if (retries >= MAX_RETRIES) {
+        if (retries >= MAX_SSE_RETRIES) {
           if (es) { try { es.close(); } catch {} es = null; }
           startPolling();
         }

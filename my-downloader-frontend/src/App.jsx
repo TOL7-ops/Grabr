@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, Component } from "react";
 import MediaPreview from "./MediaPreview";
 import { API_BASE, submitDownload, watchJob, safeStr } from "./api";
-import './App.css';
+import "./App.css";
 
 // ── Platform config ────────────────────────────────────────────
 const PLATFORMS = {
@@ -30,13 +30,7 @@ function timeAgo(iso) {
   return `${Math.floor(s/86400)}d ago`;
 }
 
-// Ensure any value is rendered as a safe string
-// const safeStr = (v) => {
-//   if (!v) return "";
-//   if (typeof v === "string") return v;
-//   if (v.message) return v.message;
-//   try { return JSON.stringify(v); } catch { return String(v); }
-// };
+
 // ── Platform SVG logos ─────────────────────────────────────────
 const PlatformLogo = ({ id, size = 28 }) => {
   const s = { width: size, height: size, borderRadius: 8, flexShrink: 0, display: "block" };

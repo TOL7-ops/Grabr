@@ -434,3 +434,28 @@ input{font-family:inherit}
 .mb.primary:hover{filter:brightness(1.1)}
 .mb.secondary{background:var(--surf2);color:var(--txt2);border:1px solid var(--bord)}
 .mb.secondary:hover{color:var(--txt)}
+
+/* ── Media Preview ────────────────────────────────────────────── */
+.mpreview{display:flex;flex-direction:column;gap:0.6rem;background:color-mix(in srgb,var(--acc) 6%,var(--surf));border:1px solid color-mix(in srgb,var(--acc) 25%,transparent);border-radius:var(--r2);padding:0.85rem;animation:fadeUp 0.3s ease}
+
+.mplayer{width:100%;border-radius:var(--r3);overflow:hidden;background:#000;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
+.mvideo{width:100%;height:100%;display:block;object-fit:contain}
+
+.mplay-btn{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.5rem;background:linear-gradient(135deg,#080c18,#0d1525);border:none;cursor:pointer}
+.mplay-btn:hover .mplay-circle{transform:scale(1.1);box-shadow:0 0 32px var(--glow)}
+.mplay-circle{width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,var(--pri),var(--pri2));display:grid;place-items:center;font-size:1.1rem;color:#fff;padding-left:3px;transition:all 0.2s;box-shadow:0 0 20px var(--glow)}
+.mplay-hint{font-size:0.72rem;color:rgba(255,255,255,0.4);font-family:'Plus Jakarta Sans',sans-serif}
+
+.maudio{display:flex;align-items:center;gap:0.6rem;background:var(--surf2);padding:0.6rem;border-radius:var(--r3)}
+.maudio-icon{font-size:1.3rem;flex-shrink:0}
+audio{width:100%;accent-color:var(--pri)}
+
+.mfilename{font-size:0.7rem;color:var(--txt2);word-break:break-all;line-height:1.4}
+
+.mbtns{display:flex;gap:0.5rem}
+.mbtn{flex:1;display:flex;align-items:center;justify-content:center;gap:0.35rem;padding:0.55rem 0.75rem;border-radius:var(--r3);font-size:0.78rem;font-weight:700;border:none;cursor:pointer;transition:all 0.15s;font-family:'Plus Jakarta Sans',sans-serif}
+.mbtn:disabled{opacity:0.6;cursor:wait}
+.mbtn-primary{background:var(--acc);color:#fff}
+.mbtn-primary:hover:not(:disabled){filter:brightness(1.1)}
+.mbtn-ghost{background:var(--surf2);color:var(--txt2);border:1px solid var(--bord)}
+.mbtn-ghost:hover{color:var(--txt)}

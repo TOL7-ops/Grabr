@@ -1,8 +1,5 @@
 import { useState, useEffect, useRef, useCallback, Component } from "react";
-import { API_BASE, submitDownload, pollJob } from "./api";
-import "./App.css"
-
-const POLL_MS = 2500;
+import { API_BASE, submitDownload, watchJob, safeStr as apiSafeStr } from "./api";
 
 // ── Platform config ────────────────────────────────────────────
 const PLATFORMS = {
@@ -91,18 +88,17 @@ class ErrorBoundary extends Component {
   }
 }
 
-// ── useDownloadManager ─────────────────────────────────────────
+// ── useDownloadManager — SSE-based ────────────────────────────
 function useDownloadManager() {
   const load = () => {
     try {
-      const raw = localStorage.getItem("grabr_jobs");
-      const parsed = JSON.parse(raw || "[]");
+      const parsed = JSON.parse(localStorage.getItem("grabr_jobs") || "[]");
       return Array.isArray(parsed) ? parsed : [];
     } catch { return []; }
   };
 
   const [jobs, setJobs] = useState(load);
-  const timers = useRef({});
+  const stoppers = useRef({}); // localId → stop() function from watchJob
 
   const save = useCallback((list) => {
     const safe = Array.isArray(list) ? list : [];
@@ -118,35 +114,54 @@ function useDownloadManager() {
     });
   }, []);
 
-  const startPoll = useCallback((localId, apiId) => {
-    if (timers.current[localId]) return;
-    timers.current[localId] = setInterval(async () => {
-      const res = await pollJob(apiId);
-      if (!res.ok) {
-        clearInterval(timers.current[localId]);
-        delete timers.current[localId];
-        patch(localId, { state: "failed", error: safeStr(res.error) });
-        return;
-      }
-      const { state, progress, result, error } = res;
-      if (state === "completed") {
-        clearInterval(timers.current[localId]);
-        delete timers.current[localId];
-        patch(localId, { state: "completed", progress: 100, result, completedAt: new Date().toISOString() });
-      } else if (state === "failed") {
-        clearInterval(timers.current[localId]);
-        delete timers.current[localId];
-        patch(localId, { state: "failed", error: safeStr(error), progress });
-      } else {
-        patch(localId, { state: state === "active" ? "active" : "queued", progress });
-      }
-    }, POLL_MS);
+  const startWatch = useCallback((localId, apiId) => {
+    if (stoppers.current[localId]) return; // already watching
+
+    const stop = watchJob(apiId, {
+      onProgress: (percent, speed, eta, size) => {
+        patch(localId, {
+          state:    "active",
+          progress: Math.min(Math.floor(percent), 100),
+          speed:    safeStr(speed),
+          eta:      safeStr(eta),
+          size:     safeStr(size),
+        });
+      },
+      onStatus: (status) => {
+        if (status === "starting" || status === "queued") {
+          patch(localId, { state: "queued", progress: 0 });
+        } else if (status === "processing") {
+          patch(localId, { state: "active", progress: 99 });
+        }
+      },
+      onComplete: (filename, fileUrl) => {
+        delete stoppers.current[localId];
+        patch(localId, {
+          state:       "completed",
+          progress:    100,
+          completedAt: new Date().toISOString(),
+          result:      { filename: safeStr(filename), downloadUrl: safeStr(fileUrl) },
+        });
+      },
+      onError: (message) => {
+        delete stoppers.current[localId];
+        patch(localId, { state: "failed", error: safeStr(message) });
+      },
+    });
+
+    stoppers.current[localId] = stop;
   }, [patch]);
 
   const addJob = useCallback(async (url, format) => {
     const id = `job_${Date.now()}`;
     const platform = detectPlatform(url) || "youtube";
-    const job = { id, url, format, platform, state: "submitting", progress: 0, createdAt: new Date().toISOString(), result: null, error: null, apiJobId: null };
+    const job = {
+      id, url, format, platform,
+      state: "submitting", progress: 0,
+      createdAt: new Date().toISOString(),
+      result: null, error: null, apiJobId: null,
+      speed: "", eta: "", size: "",
+    };
     setJobs(prev => {
       const n = [job, ...prev];
       try { localStorage.setItem("grabr_jobs", JSON.stringify(n)); } catch {}
@@ -159,12 +174,11 @@ function useDownloadManager() {
       return;
     }
     patch(id, { state: "queued", apiJobId: safeStr(res.jobId) });
-    startPoll(id, res.jobId);
-  }, [patch, startPoll]);
+    startWatch(id, res.jobId);
+  }, [patch, startWatch]);
 
   const removeJob = useCallback((id) => {
-    clearInterval(timers.current[id]);
-    delete timers.current[id];
+    if (stoppers.current[id]) { stoppers.current[id](); delete stoppers.current[id]; }
     setJobs(prev => {
       const n = prev.filter(j => j.id !== id);
       try { localStorage.setItem("grabr_jobs", JSON.stringify(n)); } catch {}
@@ -173,18 +187,19 @@ function useDownloadManager() {
   }, []);
 
   const clearAll = useCallback(() => {
-    Object.values(timers.current).forEach(clearInterval);
-    timers.current = {};
+    Object.values(stoppers.current).forEach(s => { try { s(); } catch {} });
+    stoppers.current = {};
     save([]);
   }, [save]);
 
+  // Resume watching in-progress jobs on mount
   useEffect(() => {
     jobs.forEach(j => {
       if (["queued", "active", "submitting"].includes(j.state) && j.apiJobId) {
-        startPoll(j.id, j.apiJobId);
+        startWatch(j.id, j.apiJobId);
       }
     });
-    return () => Object.values(timers.current).forEach(clearInterval);
+    return () => Object.values(stoppers.current).forEach(s => { try { s(); } catch {} });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -405,10 +420,17 @@ function DownloadsPage({ jobs, onRemove, onClear }) {
                     <span className={`spill spill-${job.state}`}>
                       {job.state === "submitting" && "🔄 Connecting"}
                       {job.state === "queued"     && "⏳ Queued"}
-                      {job.state === "active"     && "⚡ Downloading"}
+                      {job.state === "active"     && (job.progress >= 99 ? "⚙️ Processing" : "⚡ Downloading")}
                     </span>
                     <span className="jpct">{job.progress || 0}%</span>
                   </div>
+                  {job.state === "active" && (job.speed || job.eta) && (
+                    <div className="jspeed">
+                      {job.speed && <span>🚀 {job.speed}</span>}
+                      {job.eta   && <span>⏱ ETA {job.eta}</span>}
+                      {job.size  && <span>📦 {job.size}</span>}
+                    </div>
+                  )}
                 </div>
               )}
 

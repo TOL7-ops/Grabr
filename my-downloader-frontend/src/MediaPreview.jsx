@@ -3,25 +3,29 @@ import { API_BASE, safeStr, downloadFile } from "./api";
 
 export default function MediaPreview({ job }) {
   const [playing,  setPlaying]  = useState(false);
-  const [downloading, setDl]    = useState(false);
+  const [saving,   setSaving]   = useState(false);
   const [copied,   setCopied]   = useState(false);
 
   if (!job || job.state !== "completed" || !job.result) return null;
 
   const filename  = safeStr(job.result.filename);
   const mediaType = safeStr(job.result.mediaType || "file");
-  const fileUrl   = safeStr(job.result.downloadUrl).startsWith("http")
-    ? safeStr(job.result.downloadUrl)
-    : `${API_BASE}/files/${encodeURIComponent(filename)}`;
 
-  const handleDownload = async () => {
-    setDl(true);
+  // Fix localhost URLs
+  let rawUrl = safeStr(job.result.downloadUrl || "");
+  if (!rawUrl || rawUrl.includes("localhost") || rawUrl.includes("127.0.0.1")) {
+    rawUrl = `${API_BASE}/files/${encodeURIComponent(filename)}`;
+  }
+  const fileUrl = rawUrl;
+
+  const handleSave = async () => {
+    setSaving(true);
     await downloadFile(fileUrl, filename);
-    setDl(false);
+    setSaving(false);
   };
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(fileUrl).catch(() => {});
+    try { await navigator.clipboard.writeText(fileUrl); } catch {}
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -29,11 +33,11 @@ export default function MediaPreview({ job }) {
   return (
     <div className="mpreview">
 
-      {/* Video inline player */}
+      {/* Video player */}
       {mediaType === "video" && (
         <div className="mplayer">
           {!playing ? (
-            <button className="mplay-btn" onClick={() => setPlaying(true)}>
+            <button className="mplay-btn" onClick={() => setPlaying(true)} aria-label="Preview video">
               <div className="mplay-circle">▶</div>
               <span className="mplay-hint">Tap to preview</span>
             </button>
@@ -58,20 +62,15 @@ export default function MediaPreview({ job }) {
         </div>
       )}
 
-      {/* File name */}
+      {/* Filename */}
       <p className="mfilename">
-        {mediaType === "video" ? "🎬" : mediaType === "audio" ? "🎵" : "📄"}&nbsp;
-        {filename}
+        {mediaType === "video" ? "🎬" : mediaType === "audio" ? "🎵" : "📄"}&nbsp;{filename}
       </p>
 
-      {/* Action buttons */}
+      {/* Buttons */}
       <div className="mbtns">
-        <button
-          className="mbtn mbtn-primary"
-          onClick={handleDownload}
-          disabled={downloading}
-        >
-          {downloading ? "⏳ Saving…" : "⬇ Save to device"}
+        <button className="mbtn mbtn-primary" onClick={handleSave} disabled={saving}>
+          {saving ? "⏳ Saving…" : "⬇ Save to device"}
         </button>
         <button className="mbtn mbtn-ghost" onClick={handleCopy}>
           {copied ? "✓ Copied!" : "🔗 Copy link"}

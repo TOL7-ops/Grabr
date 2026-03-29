@@ -10,6 +10,47 @@ export function safeStr(v) {
   try { return JSON.stringify(v); } catch { return "Unknown error"; }
 }
 
+/**
+ * downloadFile — works on desktop AND mobile
+ *
+ * Strategy:
+ * 1. Fetch file as blob (works cross-origin, respects Content-Disposition)
+ * 2. Create object URL → click hidden anchor
+ * 3. Fallback: window.open (browser handles download via Content-Disposition)
+ *
+ * On iOS Safari: step 1+2 triggers "Save to Files"
+ * On Android Chrome: step 1+2 saves to Downloads
+ * On Desktop: step 1+2 downloads immediately
+ */
+export async function downloadFile(fileUrl, filename) {
+  // Ensure we use the correct backend URL (not localhost)
+  let url = fileUrl;
+  if (!url || url.includes("localhost") || url.includes("127.0.0.1")) {
+    // Reconstruct using API_BASE
+    const name = filename || url.split("/").pop();
+    url = `${API_BASE}/files/${encodeURIComponent(name)}`;
+  }
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob    = await response.blob();
+    const objUrl  = URL.createObjectURL(blob);
+    const a       = document.createElement("a");
+    a.href        = objUrl;
+    a.download    = filename || "download";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(objUrl); document.body.removeChild(a); }, 10000);
+    return { ok: true };
+  } catch (err) {
+    // Fallback: open in new tab — Content-Disposition will trigger download
+    window.open(url, "_blank");
+    return { ok: true };
+  }
+}
+
 export async function submitDownload(url, format) {
   try {
     const res = await fetch(`${API_BASE}/api/download`, {
@@ -26,39 +67,8 @@ export async function submitDownload(url, format) {
 }
 
 /**
- * downloadFile — works on BOTH desktop and mobile
- * Backend sends Content-Disposition: attachment which forces download.
- * For mobile we fetch as blob and trigger via anchor to ensure it saves
- * to device instead of opening in browser.
- */
-export async function downloadFile(fileUrl, filename) {
-  try {
-    const response = await fetch(fileUrl);
-    if (!response.ok) throw new Error("File not found");
-    const blob = await response.blob();
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
-    a.download = filename || "download";
-    a.style.display = "none";
-    document.body.appendChild(a);
-    a.click();
-    // Clean up
-    setTimeout(() => { URL.revokeObjectURL(url); document.body.removeChild(a); }, 5000);
-    return { ok: true };
-  } catch (err) {
-    // Fallback: open in new tab (browser will trigger download via Content-Disposition)
-    window.open(fileUrl, "_blank");
-    return { ok: true };
-  }
-}
-
-/**
  * watchJob — SSE primary, polling fallback
- * onProgress(percent, speed, eta, size)
- * onStatus(status)
- * onComplete(filename, fileUrl, mediaType)
- * onError(message)
+ * Fixes localhost URL in fileUrl before passing to onComplete
  */
 export function watchJob(jobId, { onProgress, onStatus, onComplete, onError }) {
   let closed = false, es = null, pollTimer = null, retries = 0;
@@ -68,6 +78,15 @@ export function watchJob(jobId, { onProgress, onStatus, onComplete, onError }) {
     closed = true;
     if (es)        { try { es.close(); } catch {} es = null; }
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  // Fix localhost URLs that leak from misconfigured Railway env
+  function fixUrl(rawUrl, filename) {
+    if (!rawUrl) return rawUrl;
+    if (rawUrl.includes("localhost") || rawUrl.includes("127.0.0.1")) {
+      return `${API_BASE}/files/${encodeURIComponent(filename || rawUrl.split("/").pop())}`;
+    }
+    return rawUrl;
   }
 
   function handle(data) {
@@ -81,10 +100,13 @@ export function watchJob(jobId, { onProgress, onStatus, onComplete, onError }) {
         onProgress && onProgress(Number(data.percent)||0, safeStr(data.speed), safeStr(data.eta), safeStr(data.size)); break;
       case "processing":
         onProgress && onProgress(99, "", "", ""); break;
-      case "completed":
+      case "completed": {
+        const filename = safeStr(data.filename);
+        const fileUrl  = fixUrl(safeStr(data.fileUrl), filename);
         onProgress && onProgress(100, "", "", "");
-        onComplete && onComplete(safeStr(data.filename), safeStr(data.fileUrl), safeStr(data.mediaType || "file"));
+        onComplete && onComplete(filename, fileUrl, safeStr(data.mediaType || "file"));
         stop(); break;
+      }
       case "error":
         onError && onError(safeStr(data.message || "Download failed"));
         stop(); break;
@@ -103,8 +125,10 @@ export function watchJob(jobId, { onProgress, onStatus, onComplete, onError }) {
         onProgress && onProgress(Number(data.progress)||0, "", "", "");
         onStatus   && onStatus(safeStr(data.state));
         if (data.state === "completed" && data.result) {
+          const filename = safeStr(data.result.filename);
+          const fileUrl  = fixUrl(safeStr(data.result.downloadUrl), filename);
           onProgress && onProgress(100, "", "", "");
-          onComplete && onComplete(safeStr(data.result.filename), safeStr(data.result.downloadUrl), safeStr(data.result.mediaType||"file"));
+          onComplete && onComplete(filename, fileUrl, safeStr(data.result.mediaType||"file"));
           stop();
         } else if (data.state === "failed") {
           onError && onError(safeStr(data.error || "Download failed"));

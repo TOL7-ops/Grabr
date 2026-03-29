@@ -4,25 +4,19 @@ const logger = require("../utils/logger");
 
 async function streamJob(req, res) {
   const { jobId } = req.params;
-  if (!jobId || !/^[\w-]+$/.test(jobId)) {
-    return res.status(400).json({ error: "Invalid job ID" });
-  }
+  if (!jobId || !/^[\w-]+$/.test(jobId)) return res.status(400).json({ error: "Invalid job ID" });
 
-  res.setHeader("Content-Type",    "text/event-stream");
-  res.setHeader("Cache-Control",   "no-cache");
-  res.setHeader("Connection",      "keep-alive");
+  res.setHeader("Content-Type",     "text/event-stream");
+  res.setHeader("Cache-Control",    "no-cache");
+  res.setHeader("Connection",       "keep-alive");
   res.setHeader("X-Accel-Buffering","no");
   res.flushHeaders();
 
-  // Keep-alive ping every 20s (prevents Railway/nginx from closing idle connections)
-  const ping = setInterval(() => {
-    try { res.write(": ping\n\n"); } catch { clearInterval(ping); }
-  }, 20_000);
-
+  const ping = setInterval(() => { try { res.write(": ping\n\n"); } catch { clearInterval(ping); } }, 20_000);
   registerSSE(jobId, res);
-  logger.info("SSE client connected", { jobId });
+  logger.info("SSE connected", { jobId });
 
-  // Late-join: job finished before client opened SSE connection
+  // Late-join: check if already finished
   try {
     const job = await queueService.getJob(jobId);
     if (job) {
@@ -36,27 +30,20 @@ async function streamJob(req, res) {
         sendProgress(jobId, { status: "error", message: job.failedReason || "Download failed" });
         cleanup(); return;
       }
-      // Job active — send current progress so UI doesn't show 0%
-      const prog = job.progress || 0;
-      if (prog > 0) {
-        sendProgress(jobId, { status: "downloading", percent: prog });
-      }
+      const pct = job.progress || 0;
+      if (pct > 0) sendProgress(jobId, { status: "downloading", percent: pct });
     }
-  } catch (e) {
-    logger.warn("SSE late-join check failed", { jobId, error: e.message });
-  }
+  } catch (e) { logger.warn("SSE late-join failed", { jobId, error: e.message }); }
 
   function cleanup() {
     clearInterval(ping);
     unregisterSSE(jobId);
-    logger.info("SSE client disconnected", { jobId });
+    logger.info("SSE disconnected", { jobId });
     try { res.end(); } catch {}
   }
-
   req.on("close",  cleanup);
   req.on("error",  cleanup);
   res.on("error",  cleanup);
   res.on("finish", cleanup);
 }
-
 module.exports = { streamJob };

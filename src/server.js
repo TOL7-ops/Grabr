@@ -41,3 +41,17 @@ process.on("unhandledRejection", (reason) => {
   logger.error("Unhandled rejection", { reason });
   process.exit(1);
 });
+
+// ── Embedded worker ───────────────────────────────────────────────
+// When API and worker run as SEPARATE Railway services, they have
+// separate Node.js processes with separate sseClients Maps in memory.
+// Worker calls sendProgress() but the SSE client is registered in the
+// API process — so the worker's sendProgress finds no client → only pings.
+//
+// Solution: run the worker IN the same process as the API.
+// Set RUN_WORKER=true in Railway Variables on your API service.
+// You can then delete the separate worker service entirely.
+if (process.env.RUN_WORKER === "true") {
+  logger.info("Starting embedded worker in API process (RUN_WORKER=true)");
+  require("./workers/download.worker");
+}

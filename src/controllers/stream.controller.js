@@ -4,7 +4,9 @@ const logger = require("../utils/logger");
 
 async function streamJob(req, res) {
   const { jobId } = req.params;
-  if (!jobId || !/^[\w-]+$/.test(jobId)) return res.status(400).json({ error: "Invalid job ID" });
+  if (!jobId || !/^[\w-]+$/.test(jobId)) {
+    return res.status(400).json({ error: "Invalid job ID" });
+  }
 
   res.setHeader("Content-Type",     "text/event-stream");
   res.setHeader("Cache-Control",    "no-cache");
@@ -12,11 +14,14 @@ async function streamJob(req, res) {
   res.setHeader("X-Accel-Buffering","no");
   res.flushHeaders();
 
-  const ping = setInterval(() => { try { res.write(": ping\n\n"); } catch { clearInterval(ping); } }, 20_000);
-  registerSSE(jobId, res);
-  logger.info("SSE connected", { jobId });
+  // Keep-alive ping every 20s
+  const ping = setInterval(() => {
+    try { res.write(": ping\n\n"); } catch { clearInterval(ping); }
+  }, 20_000);
 
-  // Late-join: check if already finished
+  registerSSE(jobId, res);
+
+  // Late-join: job already finished before SSE connected
   try {
     const job = await queueService.getJob(jobId);
     if (job) {
@@ -30,20 +35,24 @@ async function streamJob(req, res) {
         sendProgress(jobId, { status: "error", message: job.failedReason || "Download failed" });
         cleanup(); return;
       }
+      // Send current progress if job is active
       const pct = job.progress || 0;
       if (pct > 0) sendProgress(jobId, { status: "downloading", percent: pct });
     }
-  } catch (e) { logger.warn("SSE late-join failed", { jobId, error: e.message }); }
+  } catch (e) {
+    logger.warn("SSE late-join failed", { jobId, error: e.message });
+  }
 
   function cleanup() {
     clearInterval(ping);
     unregisterSSE(jobId);
-    logger.info("SSE disconnected", { jobId });
     try { res.end(); } catch {}
   }
+
   req.on("close",  cleanup);
   req.on("error",  cleanup);
   res.on("error",  cleanup);
   res.on("finish", cleanup);
 }
+
 module.exports = { streamJob };

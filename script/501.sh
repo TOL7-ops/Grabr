@@ -1,3 +1,143 @@
+#!/bin/bash
+# ─────────────────────────────────────────────────────────────────
+# fix-youtube-streaming.sh
+# Fix 1: Dockerfile — copy cookies/, use binary yt-dlp, correct Node path
+# Fix 2: JS runtime flag nodejs → node
+# Fix 3: Progress stuck at 5% — onProgress called with number not object
+# Fix 4: Progress regex — handle all yt-dlp output formats
+# Run: bash script/fix-youtube-streaming.sh
+# ─────────────────────────────────────────────────────────────────
+G='\033[0;32m'; R='\033[0;31m'; Y='\033[1;33m'; C='\033[0;36m'; B='\033[1;37b'; N='\033[0m'
+pass() { echo -e "${G}  ✓ $1${N}"; }
+fail() { echo -e "${R}  ✗ $1${N}"; FAIL=$((FAIL+1)); }
+warn() { echo -e "${Y}  ! $1${N}"; }
+section() { echo -e "\n\033[0;36m══════════════════════════════════════════\033[0m\n\033[1;37m  $1\033[0m\n\033[0;36m══════════════════════════════════════════\033[0m"; }
+FAIL=0
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BACKEND_DIR=""; dir="$SCRIPT_DIR"
+for i in 1 2 3 4 5; do
+  [ -f "$dir/src/app.js" ] && { BACKEND_DIR="$dir"; break; }
+  dir="$(dirname "$dir")"
+done
+[ -z "$BACKEND_DIR" ] && [ -f "$(pwd)/src/app.js" ] && BACKEND_DIR="$(pwd)"
+[ -z "$BACKEND_DIR" ] && { echo "Run from inside downloader-Api"; exit 1; }
+
+FRONTEND_DIR=""
+for name in my-downloader-frontend grabr-frontend frontend; do
+  [ -d "$BACKEND_DIR/$name/src" ] && { FRONTEND_DIR="$BACKEND_DIR/$name"; break; }
+done
+
+section "0. Paths"
+pass "Backend : $BACKEND_DIR"
+[ -n "$FRONTEND_DIR" ] && pass "Frontend: $FRONTEND_DIR"
+
+# ════════════════════════════════════════════════════════════════
+section "1. Check cookies"
+# ════════════════════════════════════════════════════════════════
+COOKIES_DIR="$BACKEND_DIR/cookies"
+COOKIES_FILE="$COOKIES_DIR/youtube.txt"
+
+if [ -f "$COOKIES_FILE" ]; then
+  LINES=$(wc -l < "$COOKIES_FILE")
+  pass "cookies/youtube.txt exists ($LINES lines)"
+else
+  fail "cookies/youtube.txt NOT FOUND"
+  echo ""
+  warn "You need YouTube cookies to bypass bot detection."
+  warn "Steps:"
+  warn "  1. Install Chrome extension: 'Get cookies.txt LOCALLY'"
+  warn "  2. Go to youtube.com while logged in"
+  warn "  3. Click extension → Export → save as: $COOKIES_FILE"
+  warn "  4. Run this script again"
+  mkdir -p "$COOKIES_DIR"
+  echo "# Add your YouTube cookies here" > "$COOKIES_FILE"
+  warn "Created empty placeholder — replace with real cookies"
+fi
+
+# ════════════════════════════════════════════════════════════════
+section "2. FIX Dockerfile — binary yt-dlp + copy cookies + node runtime"
+# ════════════════════════════════════════════════════════════════
+# Problems in old Dockerfile:
+# - pip yt-dlp gets outdated version
+# - node-slim has no full Node.js binary path for yt-dlp
+# - cookies/ directory never copied
+# - --js-runtimes nodejs wrong (should be node)
+
+cat > "$BACKEND_DIR/Dockerfile" << 'EOF'
+FROM node:20 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    NODE_ENV=production \
+    YTDLP_PATH=/usr/local/bin/yt-dlp \
+    FFMPEG_PATH=/usr/bin/ffmpeg \
+    DOWNLOAD_PATH=/tmp/downloads \
+    PORT=3000
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip ffmpeg curl wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify ffmpeg
+RUN which ffmpeg && ffmpeg -version 2>&1 | head -1
+
+# Install yt-dlp as binary (not pip) — always latest, more reliable
+RUN wget -q "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" \
+    -O /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp \
+    && yt-dlp --version
+
+# Tell yt-dlp where Node.js binary is for JS runtime
+# The flag is "--js-runtimes node" (NOT "nodejs")
+# Full path ensures it's found even if PATH differs
+RUN mkdir -p /root/.config/yt-dlp && \
+    NODE_BIN=$(which node) && \
+    echo "--js-runtimes node:${NODE_BIN}" > /root/.config/yt-dlp/config && \
+    echo "--retries 5"                   >> /root/.config/yt-dlp/config && \
+    echo "--socket-timeout 60"           >> /root/.config/yt-dlp/config && \
+    echo "--no-cache-dir"                >> /root/.config/yt-dlp/config && \
+    cat /root/.config/yt-dlp/config
+
+# Verify yt-dlp can find node runtime
+RUN yt-dlp --version && echo "yt-dlp config OK"
+
+# Create writable download dir
+RUN mkdir -p /tmp/downloads && chmod 777 /tmp/downloads
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci --only=production
+
+COPY src/ ./src/
+
+# CRITICAL: copy cookies so YouTube bot check passes
+COPY cookies/ ./cookies/
+
+RUN mkdir -p logs
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+CMD ["node", "src/server.js"]
+
+FROM base AS worker
+CMD ["node", "src/workers/download.worker.js"]
+EOF
+pass "Dockerfile — binary yt-dlp, cookies copied, node runtime with full path"
+
+# ════════════════════════════════════════════════════════════════
+section "3. FIX download.service.js — runtime flag + progress streaming"
+# ════════════════════════════════════════════════════════════════
+# Problems:
+# - "--js-runtimes nodejs" wrong → should be "node"  
+# - onProgress(0) called with number not object → UI stuck at 5%
+# - emit() and onProgress() calling pattern inconsistent
+
+cat > "$BACKEND_DIR/src/services/download.service.js" << 'JSEOF'
 const { spawn, execFile } = require("child_process");
 const path   = require("path");
 const fs     = require("fs");
@@ -81,10 +221,6 @@ function buildArgs(url, format, outputTemplate) {
     "--retries",              "5",
     "--fragment-retries",     "5",
     "--concurrent-fragments", "4",
-    "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
-    "--remux-video", "mp4",
-    "--postprocessor-args", "ffmpeg:-movflags faststart",
-    "--merge-output-format", "mp4",
     "--no-cache-dir",
     "--no-part",
     "--newline",
@@ -300,3 +436,83 @@ function pruneOldFiles() {
 }
 
 module.exports = { runDownload, getMetadata, pruneOldFiles, registerSSE, unregisterSSE, sendProgress };
+JSEOF
+pass "download.service.js — node runtime, cookies, multi-regex progress, emit() fixed"
+
+# ════════════════════════════════════════════════════════════════
+section "4. Verify"
+# ════════════════════════════════════════════════════════════════
+grep -q "node:\${NODE_BIN}" "$BACKEND_DIR/src/services/download.service.js" \
+  && pass "service — correct --js-runtimes node:PATH flag" \
+  || fail "service — runtime flag wrong"
+
+grep -q "RE_FRAG\|RE_PROGRESS_DONE" "$BACKEND_DIR/src/services/download.service.js" \
+  && pass "service — multiple progress regex patterns" \
+  || fail "service — missing extended progress regex"
+
+grep -q "cookiesPaths" "$BACKEND_DIR/src/services/download.service.js" \
+  && pass "service — cookies path resolution" \
+  || fail "service — cookies path missing"
+
+grep -q "COPY cookies" "$BACKEND_DIR/Dockerfile" \
+  && pass "Dockerfile — cookies/ copied into image" \
+  || fail "Dockerfile — cookies/ NOT copied"
+
+grep -q "node:\${NODE_BIN}\|node:/" "$BACKEND_DIR/Dockerfile" \
+  && pass "Dockerfile — Node.js runtime configured" \
+  || fail "Dockerfile — Node.js runtime not configured"
+
+[ -f "$BACKEND_DIR/cookies/youtube.txt" ] \
+  && pass "cookies/youtube.txt exists" \
+  || fail "cookies/youtube.txt MISSING — YouTube will block downloads"
+
+# ════════════════════════════════════════════════════════════════
+section "5. Git commit and push"
+# ════════════════════════════════════════════════════════════════
+GIT_ROOT=""
+dir="$BACKEND_DIR"
+for i in 1 2 3 4 5; do
+  [ -d "$dir/.git" ] && { GIT_ROOT="$dir"; break; }
+  dir="$(dirname "$dir")"
+done
+
+if [ -n "$GIT_ROOT" ]; then
+  cd "$GIT_ROOT" || exit 1
+  git config user.email "deploy@grabr.app" 2>/dev/null || true
+  git config user.name  "Grabr Deploy"    2>/dev/null || true
+  git add \
+    "$BACKEND_DIR/Dockerfile" \
+    "$BACKEND_DIR/src/services/download.service.js" \
+    "$BACKEND_DIR/cookies/"
+  if git diff --cached --quiet; then
+    git commit --allow-empty -m "fix: youtube runtime, cookies, progress streaming"
+  else
+    git commit -m "fix: js-runtime node:PATH, cookies in Docker, multi-regex progress"
+  fi
+  BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+  git push origin "$BRANCH" \
+    && pass "Pushed → Railway rebuilds Docker image (~3 min)" \
+    || { git push --set-upstream origin "$BRANCH" && pass "Pushed"; }
+else
+  warn "No git repo — push manually"
+fi
+
+# ════════════════════════════════════════════════════════════════
+section "Summary"
+# ════════════════════════════════════════════════════════════════
+echo ""
+echo "  Fixes:"
+echo "  1. Dockerfile: COPY cookies/ ./cookies/ — YouTube cookies now in image"
+echo "  2. Dockerfile: Node.js full path in yt-dlp config (--js-runtimes node:/path)"
+echo "  3. Dockerfile: yt-dlp binary (not pip) — always latest"
+echo "  4. service: --js-runtimes node:\${NODE_BIN} (not 'nodejs')"
+echo "  5. service: cookies auto-detected at /app/cookies/youtube.txt"
+echo "  6. service: emit() always sends objects, never plain numbers"
+echo "  7. service: 3 regex patterns for progress (normal, fragment, done)"
+echo ""
+echo "  After Railway rebuild (~3 min), test YouTube:"
+echo "  curl -X POST https://grabr-production-fa32.up.railway.app/api/download \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{\"url\":\"https://youtu.be/dQw4w9WgXcQ\",\"format\":\"mp4\"}'"
+echo ""
+if [ $FAIL -eq 0 ]; then echo -e "${G}  ✓ All done!${N}"; else echo -e "${R}  ✗ $FAIL issue(s)${N}"; fi

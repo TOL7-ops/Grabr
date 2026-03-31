@@ -4,52 +4,44 @@ const fs     = require("fs");
 const config = require("../config");
 const logger = require("../utils/logger");
 
-// ── SSE registry ─────────────────────────────────────────────────
+// ── SSE registry ──────────────────────────────────────────────────
 const sseClients = new Map();
 
 function registerSSE(jobId, res) {
   sseClients.set(String(jobId), res);
-  logger.info("SSE client registered", { jobId, total: sseClients.size });
+  logger.info("SSE registered", { jobId, clients: sseClients.size });
 }
-
 function unregisterSSE(jobId) {
   sseClients.delete(String(jobId));
 }
-
 function sendProgress(jobId, data) {
   const res = sseClients.get(String(jobId));
-  if (!res) {
-    // No SSE client connected — that's OK, worker still calls this
-    return;
-  }
-  try {
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  } catch (e) {
-    logger.warn("SSE write failed", { jobId, error: e.message });
+  if (!res) return;
+  try { res.write(`data: ${JSON.stringify(data)}\n\n`); }
+  catch (e) {
+    logger.warn("SSE write failed", { jobId });
     unregisterSSE(jobId);
   }
 }
 
 // ── Binary resolution ─────────────────────────────────────────────
 function resolveBin(envKey, candidates) {
-  const fromEnv = process.env[envKey];
-  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+  const v = process.env[envKey];
+  if (v && fs.existsSync(v)) return v;
   for (const c of candidates) if (fs.existsSync(c)) return c;
   return candidates[0];
 }
-
 const YTDLP_BIN  = resolveBin("YTDLP_PATH",  ["/usr/local/bin/yt-dlp", "/usr/bin/yt-dlp", "yt-dlp"]);
 const FFMPEG_BIN = resolveBin("FFMPEG_PATH",  ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]);
+// Node.js binary full path — needed for yt-dlp JS runtime
+const NODE_BIN   = process.execPath || resolveBin("", ["/usr/local/bin/node", "/usr/bin/node", "node"]);
 
-logger.info("Binaries", { ytdlp: YTDLP_BIN, ffmpeg: FFMPEG_BIN });
+logger.info("Binaries", { ytdlp: YTDLP_BIN, ffmpeg: FFMPEG_BIN, node: NODE_BIN });
 
 // ── Filename sanitizer ────────────────────────────────────────────
 function sanitizeFilename(raw) {
-  return raw
-    .replace(/[^\w.-]+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 200);
+  return raw.replace(/[^\w.-]+/g, "_").replace(/_+/g, "_")
+            .replace(/^_+|_+$/g, "").slice(0, 200);
 }
 
 // ── Format map ────────────────────────────────────────────────────
@@ -66,13 +58,24 @@ const FORMAT_MAP = {
 };
 
 function buildArgs(url, format, outputTemplate) {
-  const cookiesFile = "/app/cookies/youtube.txt";
-  const cookiesArgs = fs.existsSync(cookiesFile) ? ["--cookies", cookiesFile] : [];
+  // Cookies: check /app/cookies/youtube.txt (inside Docker)
+  // and local path (for dev)
+  const cookiesPaths = [
+    "/app/cookies/youtube.txt",
+    path.join(__dirname, "../../cookies/youtube.txt"),
+  ];
+  const cookiesFile = cookiesPaths.find(p => fs.existsSync(p));
+  const cookiesArgs = cookiesFile ? ["--cookies", cookiesFile] : [];
+
+  if (cookiesFile) logger.info("Using cookies", { path: cookiesFile });
+  else logger.warn("No cookies file found — YouTube may block bot");
+
   return [
     ...(FORMAT_MAP[format] || FORMAT_MAP.best),
     "--no-playlist",
     "--restrict-filenames",
-    "--js-runtimes",          "nodejs",
+    // CORRECT flag: "node" not "nodejs" — with full path to binary
+    "--js-runtimes",          `node:${NODE_BIN}`,
     "--max-filesize",         `${config.storage.maxFileSizeMb}m`,
     "--socket-timeout",       "60",
     "--retries",              "5",
@@ -80,7 +83,7 @@ function buildArgs(url, format, outputTemplate) {
     "--concurrent-fragments", "4",
     "--no-cache-dir",
     "--no-part",
-    "--newline",             // one progress line per chunk — critical for real-time
+    "--newline",
     "--ffmpeg-location",      FFMPEG_BIN,
     ...cookiesArgs,
     "-o",                     outputTemplate,
@@ -88,15 +91,21 @@ function buildArgs(url, format, outputTemplate) {
   ];
 }
 
-const RE_PROGRESS = /\[download\]\s+([\d.]+)%\s+of\s+([\d.]+\S+)\s+at\s+([\S]+)\s+ETA\s+([\S]+)/;
-const RE_MERGE    = /\[Merger\] Merging formats into "(.+?)"/;
-const RE_FFMPEG   = /\[ffmpeg\] Destination:\s+(.+)/;
-const RE_DEST     = /\[download\] Destination:\s+(.+)/;
+// ── Progress regexes ──────────────────────────────────────────────
+// yt-dlp outputs several formats — handle all of them:
+// [download]  42.3% of   10.00MiB at    1.23MiB/s ETA 00:05
+// [download]  42.3% of ~  10.00MiB at    1.23MiB/s ETA 00:05 (frag 3/7)
+// [download] 100% of    3.29MiB in 00:00:00 at 4.14MiB/s
+const RE_PROGRESS_FULL = /\[download\]\s+([\d.]+)%\s+of\s+~?\s*([\d.]+\S+)\s+at\s+([\d.]+\S+)\s+ETA\s+([\d:]+)/;
+const RE_PROGRESS_DONE = /\[download\]\s+100%\s+of\s+~?\s*([\d.]+\S+)\s+in\s+([\d:]+)/;
+const RE_FRAG          = /\[download\]\s+([\d.]+)%\s+of\s+~?\s*([\d.]+\S+).*\(frag\s+(\d+)\/(\d+)\)/;
+const RE_MERGE         = /\[Merger\] Merging formats into "(.+?)"/;
+const RE_FFMPEG        = /\[ffmpeg\] Destination:\s+(.+)/;
+const RE_DEST          = /\[download\] Destination:\s+(.+)/;
 
 // ── runDownload ───────────────────────────────────────────────────
 async function runDownload(url, format, jobId, onProgress) {
   const downloadDir = path.resolve(config.storage.downloadPath);
-
   if (!fs.existsSync(downloadDir)) {
     try { fs.mkdirSync(downloadDir, { recursive: true, mode: 0o755 }); }
     catch (e) { throw new Error(`Cannot create dir ${downloadDir}: ${e.message}`); }
@@ -109,25 +118,19 @@ async function runDownload(url, format, jobId, onProgress) {
 
   logger.info("Spawning yt-dlp", { jobId, bin: YTDLP_BIN, dir: downloadDir });
 
-  /*
-   * emit() is the single source of truth for progress.
-   * It pushes to:
-   *   A. sendProgress(jobId, data) → SSE registry → browser EventSource
-   *   B. onProgress(data, pct)    → worker → job.updateProgress + sendProgress again
-   *
-   * Note: sendProgress is called here AND in the worker.
-   * Calling it here too means progress works even without a worker onProgress callback.
-   */
+  // emit: single function that pushes to BOTH SSE and BullMQ via onProgress
+  // Always sends objects — never plain numbers
   const emit = (data) => {
-    // Direct SSE push (works if browser has SSE open)
+    // Direct SSE push
     sendProgress(String(jobId), data);
-    // Also notify worker callback (which calls sendProgress again — harmless duplicate)
+    // Also call worker callback for BullMQ progress
     if (onProgress) {
       const pct = typeof data === "object" ? (data.percent || 0) : Number(data) || 0;
-      onProgress(data, pct);
+      try { onProgress(data, pct); } catch {}
     }
   };
 
+  // Send starting event — as object, never plain number
   emit({ status: "starting", percent: 5 });
 
   const start = Date.now();
@@ -145,13 +148,14 @@ async function runDownload(url, format, jobId, onProgress) {
     child.stdout.on("data", chunk => {
       stdoutBuf += chunk.toString();
       const lines = stdoutBuf.split("\n");
-      stdoutBuf = lines.pop(); // keep incomplete line
+      stdoutBuf = lines.pop();
 
       for (const raw of lines) {
         const line = raw.trim();
         if (!line) continue;
+        logger.debug("yt-dlp", { jobId, line });
 
-        // Phase: merging
+        // Phase switch
         if ((line.startsWith("[Merger]") || line.startsWith("[ffmpeg]")) && phase !== "processing") {
           phase = "processing";
           emit({ status: "processing", percent: 99 });
@@ -165,26 +169,53 @@ async function runDownload(url, format, jobId, onProgress) {
         else if (fM) outputPath = fM[1].trim();
         else if (dM && !outputPath) outputPath = dM[1].trim();
 
-        // Parse progress
-        const pM = line.match(RE_PROGRESS);
-        if (pM) {
-          const percent = parseFloat(pM[1]);
-          if (percent - lastPct >= 1 || percent >= 100) {
-            lastPct = percent;
-            emit({
-              status:  "downloading",
-              percent: Math.min(percent, 98),
-              size:    pM[2],
-              speed:   pM[3],
-              eta:     pM[4],
-            });
-          }
+        // Parse progress — try all regex variants
+        let percent = null, size = "", speed = "", eta = "";
+
+        const fullM = line.match(RE_PROGRESS_FULL);
+        const doneM = line.match(RE_PROGRESS_DONE);
+        const fragM = line.match(RE_FRAG);
+
+        if (fullM) {
+          percent = parseFloat(fullM[1]);
+          size    = fullM[2];
+          speed   = fullM[3];
+          eta     = fullM[4];
+        } else if (fragM) {
+          // Fragment download: calculate % from frag count
+          const frag  = parseInt(fragM[3]);
+          const total = parseInt(fragM[4]);
+          percent = Math.round((frag / total) * 100);
+          size    = fragM[2];
+          speed   = "";
+          eta     = "";
+        } else if (doneM) {
+          percent = 100;
+          size    = doneM[1];
+          speed   = "";
+          eta     = "0:00";
+        }
+
+        if (percent !== null && (percent - lastPct >= 1 || percent >= 100)) {
+          lastPct = percent;
+          emit({
+            status:  "downloading",
+            percent: Math.min(percent, 98),
+            size,
+            speed,
+            eta,
+          });
         }
       }
     });
 
     child.stderr.on("data", chunk => {
-      stderrBuf += chunk.toString();
+      const text = chunk.toString();
+      stderrBuf += text;
+      // Log warnings in real time so they show in Railway logs
+      text.split("\n").forEach(line => {
+        if (line.trim()) logger.debug("yt-dlp stderr", { jobId, line: line.trim() });
+      });
     });
 
     child.on("close", code => {
@@ -211,15 +242,12 @@ async function runDownload(url, format, jobId, onProgress) {
       }
 
       // Sanitize filename
-      const rawName  = path.basename(outputPath);
-      const ext      = path.extname(rawName);
-      const baseName = path.basename(rawName, ext);
-      const cleanName = sanitizeFilename(baseName) + ext;
+      const rawName   = path.basename(outputPath);
+      const ext       = path.extname(rawName);
+      const cleanName = sanitizeFilename(path.basename(rawName, ext)) + ext;
       const cleanPath = path.join(downloadDir, cleanName);
-
       if (rawName !== cleanName && !fs.existsSync(cleanPath)) {
-        try { fs.renameSync(outputPath, cleanPath); outputPath = cleanPath; }
-        catch { /* keep original */ }
+        try { fs.renameSync(outputPath, cleanPath); outputPath = cleanPath; } catch {}
       }
 
       const filename  = path.basename(outputPath);
@@ -230,7 +258,7 @@ async function runDownload(url, format, jobId, onProgress) {
                       : "file";
 
       emit({ status: "completed", percent: 100, filename, fileUrl, mediaType });
-      logger.info("Complete", { jobId, filename, elapsed: `${elapsed}s`, fileUrl });
+      logger.info("Complete", { jobId, filename, fileUrl, elapsed: `${elapsed}s` });
       resolve({ filePath: outputPath, filename, fileUrl, mediaType });
     });
 
@@ -243,8 +271,10 @@ async function runDownload(url, format, jobId, onProgress) {
 
 async function getMetadata(url) {
   return new Promise((resolve, reject) => {
-    execFile(YTDLP_BIN, ["--dump-json", "--no-playlist", "--js-runtimes", "nodejs", url],
-      { timeout: 30_000 }, (err, stdout) => {
+    execFile(YTDLP_BIN,
+      ["--dump-json", "--no-playlist", `--js-runtimes`, `node:${NODE_BIN}`, url],
+      { timeout: 30_000 },
+      (err, stdout) => {
         if (err) return reject(err);
         try {
           const d = JSON.parse(stdout);

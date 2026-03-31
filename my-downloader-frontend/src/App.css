@@ -459,3 +459,6 @@ audio{width:100%;accent-color:var(--pri)}
 .mbtn-primary:hover:not(:disabled){filter:brightness(1.1)}
 .mbtn-ghost{background:var(--surf2);color:var(--txt2);border:1px solid var(--bord)}
 .mbtn-ghost:hover{color:var(--txt)}
+
+.mhint{font-size:0.65rem;color:var(--txt3);text-align:center;padding:0 0.25rem;line-height:1.4}
+.mshare-err{font-size:0.7rem;color:var(--warn);text-align:center}

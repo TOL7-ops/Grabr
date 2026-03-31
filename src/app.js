@@ -13,7 +13,7 @@ const logger = require("./utils/logger");
 const app = express();
 app.set("trust proxy", 1);
 
-// ── CORS — allow ALL *.vercel.app + localhost ─────────────────────
+// CORS — allow ALL *.vercel.app + localhost
 function isAllowedOrigin(origin) {
   if (!origin) return true;
   if (/^https:\/\/[a-zA-Z0-9-]+\.vercel\.app$/.test(origin)) return true;
@@ -22,15 +22,13 @@ function isAllowedOrigin(origin) {
   if (process.env.CORS_ORIGIN && origin === process.env.CORS_ORIGIN) return true;
   return false;
 }
-
 app.use(cors({
   origin: (origin, cb) => isAllowedOrigin(origin) ? cb(null, true) : cb(new Error(`CORS: ${origin}`)),
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  methods: ["GET","POST","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization"],
   credentials: false,
 }));
 app.options("*", cors());
-
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.use(morgan("combined", {
   stream: { write: msg => logger.http(msg.trim()) },
@@ -38,33 +36,22 @@ app.use(morgan("combined", {
 }));
 app.use(express.json({ limit: "10kb" }));
 
-// ── MIME types ────────────────────────────────────────────────────
+// MIME map
 const MIME = {
-  ".mp4":  "video/mp4",
-  ".webm": "video/webm",
-  ".mkv":  "video/x-matroska",
-  ".mov":  "video/quicktime",
-  ".mp3":  "audio/mpeg",
-  ".m4a":  "audio/mp4",
-  ".ogg":  "audio/ogg",
-  ".wav":  "audio/wav",
-  ".opus": "audio/opus",
+  ".mp4":"video/mp4", ".webm":"video/webm", ".mkv":"video/x-matroska",
+  ".mov":"video/quicktime", ".mp3":"audio/mpeg", ".m4a":"audio/mp4",
+  ".ogg":"audio/ogg", ".wav":"audio/wav", ".opus":"audio/opus",
 };
 
-// ── File serving ──────────────────────────────────────────────────
-// Uses wildcard route to accept filenames with dots, dashes, spaces
-// Only blocks path traversal (..)
-// Sets Content-Disposition: attachment → forces download on all browsers
-// Sets correct MIME → iOS offers "Save to Photos" for video/mp4
+// ── File serving — wildcard route ─────────────────────────────────
+// Accepts filenames with dots, dashes, spaces — only blocks ".."
+// Content-Disposition: attachment → forces download on all browsers
+// video/mp4 MIME → iOS offers "Save to Photos"
 app.get("/files/:filename(*)", (req, res) => {
   let filename;
-  try {
-    filename = decodeURIComponent(req.params.filename);
-  } catch {
-    return res.status(400).json({ error: "Bad filename encoding" });
-  }
+  try { filename = decodeURIComponent(req.params.filename); }
+  catch { return res.status(400).json({ error: "Bad filename encoding" }); }
 
-  // Only block traversal — allow dots, dashes, spaces, underscores
   if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
     return res.status(400).json({ error: "Invalid filename" });
   }
@@ -72,33 +59,25 @@ app.get("/files/:filename(*)", (req, res) => {
   const downloadDir = path.resolve(config.storage.downloadPath);
   const filePath    = path.join(downloadDir, filename);
 
-  // Ensure within download dir
   if (!filePath.startsWith(downloadDir + path.sep)) {
     return res.status(400).json({ error: "Invalid path" });
   }
 
   if (!fs.existsSync(filePath)) {
-    logger.warn("File not found", { filename });
+    logger.warn("File not found", { filename, dir: downloadDir });
     return res.status(404).json({ error: "File not found", filename });
   }
 
-  const stat      = fs.statSync(filePath);
-  const ext       = path.extname(filename).toLowerCase();
-  const mimeType  = MIME[ext] || "application/octet-stream";
-  const isVideo   = mimeType.startsWith("video/");
+  const stat     = fs.statSync(filePath);
+  const ext      = path.extname(filename).toLowerCase();
+  const mimeType = MIME[ext] || "application/octet-stream";
 
-  // Content-Disposition: attachment → forces download (not open-in-browser)
-  // iOS Safari: video/mp4 + attachment → "Save to Photos" option appears
   res.setHeader("Content-Type",        mimeType);
   res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
   res.setHeader("Content-Length",      stat.size);
   res.setHeader("Accept-Ranges",       "bytes");
   res.setHeader("Cache-Control",       "no-cache");
   res.setHeader("Access-Control-Allow-Origin", "*");
-  // faststart flag in ffmpeg moves moov atom to front → mobile can play while downloading
-  if (isVideo) {
-    res.setHeader("X-Content-Type-Options", "nosniff");
-  }
 
   res.sendFile(filePath, { root: "/" }, err => {
     if (err && !res.headersSent) {
@@ -108,7 +87,6 @@ app.get("/files/:filename(*)", (req, res) => {
   });
 });
 
-// Debug endpoint
 app.get("/debug/path", (_req, res) => {
   const dir = config.storage.downloadPath;
   let writable = false, exists = fs.existsSync(dir);

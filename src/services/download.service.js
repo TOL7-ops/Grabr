@@ -101,9 +101,10 @@ function buildArgs(url, format, outputTemplate) {
     "--retries",              "5",
     "--fragment-retries",     "5",
     // Reduced from 4 → 2 to prevent ETIMEDOUT on Railway's network
-    "--concurrent-fragments", "2",
+    "--concurrent-fragments", "1",
     "--no-cache-dir",
     "--no-part",
+    "--force-ipv4",
     "--newline",
     "--ffmpeg-location",      FFMPEG_BIN,
     ...cookiesArgs,

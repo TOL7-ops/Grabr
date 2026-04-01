@@ -36,22 +36,27 @@ app.use(morgan("combined", {
 }));
 app.use(express.json({ limit: "10kb" }));
 
-// MIME map
-const MIME = {
-  ".mp4":"video/mp4", ".webm":"video/webm", ".mkv":"video/x-matroska",
-  ".mov":"video/quicktime", ".mp3":"audio/mpeg", ".m4a":"audio/mp4",
-  ".ogg":"audio/ogg", ".wav":"audio/wav", ".opus":"audio/opus",
+// MIME types for correct Content-Type on all devices
+const MIME_TYPES = {
+  ".mp4":  "video/mp4",  ".webm": "video/webm", ".mkv": "video/x-matroska",
+  ".mov":  "video/quicktime", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
+  ".ogg":  "audio/ogg",  ".wav": "audio/wav",    ".opus": "audio/opus",
 };
 
 // ── File serving — wildcard route ─────────────────────────────────
-// Accepts filenames with dots, dashes, spaces — only blocks ".."
-// Content-Disposition: attachment → forces download on all browsers
-// video/mp4 MIME → iOS offers "Save to Photos"
+// :filename(*) accepts ANY character including dots, dashes, spaces
+// ONLY blocks ".." path traversal
+// Content-Disposition: attachment forces download (not open in browser)
+// video/mp4 MIME enables "Save to Photos" on iOS
 app.get("/files/:filename(*)", (req, res) => {
   let filename;
-  try { filename = decodeURIComponent(req.params.filename); }
-  catch { return res.status(400).json({ error: "Bad filename encoding" }); }
+  try {
+    filename = decodeURIComponent(req.params.filename);
+  } catch {
+    return res.status(400).json({ error: "Bad filename encoding" });
+  }
 
+  // Block ONLY path traversal
   if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
     return res.status(400).json({ error: "Invalid filename" });
   }
@@ -70,7 +75,7 @@ app.get("/files/:filename(*)", (req, res) => {
 
   const stat     = fs.statSync(filePath);
   const ext      = path.extname(filename).toLowerCase();
-  const mimeType = MIME[ext] || "application/octet-stream";
+  const mimeType = MIME_TYPES[ext] || "application/octet-stream";
 
   res.setHeader("Content-Type",        mimeType);
   res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
@@ -87,6 +92,7 @@ app.get("/files/:filename(*)", (req, res) => {
   });
 });
 
+// Debug
 app.get("/debug/path", (_req, res) => {
   const dir = config.storage.downloadPath;
   let writable = false, exists = fs.existsSync(dir);
